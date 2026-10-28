@@ -1,0 +1,68 @@
+#cloud-config
+# User-data for the tracker instance (Amazon Linux 2023). deploy/launch.sh fills the ${...} placeholders with
+# `envsubst` before passing this file; they are not variables on the instance.
+#   REPO_URL BRANCH BUCKET RUN_ID TRACKER_ARGS RUN_MINUTES GIT_TOKEN_PARAM REGION
+package_update: true
+packages: [git, python3.12, python3.12-pip, chrony, zstd]
+write_files:
+  - path: /etc/ext-tracker.env
+    content: |
+      TRACKER_ARGS=${TRACKER_ARGS} --run-id ${RUN_ID}
+      RUN_ID=${RUN_ID}
+      BUCKET=${BUCKET}
+  - path: /etc/systemd/system/ext-sync.service
+    content: |
+      [Unit]
+      Description=Sync finished tracker files to S3 and prune local raw files older than 2 days
+      [Service]
+      Type=oneshot
+      User=ec2-user
+      EnvironmentFile=/etc/ext-tracker.env
+      ExecStart=/usr/bin/aws s3 sync /opt/ext-latency-tracker/data/${RUN_ID} s3://${BUCKET}/${RUN_ID}/ --exclude "*.partial" --exclude "summary.json" --only-show-errors
+      ExecStartPost=/usr/bin/find /opt/ext-latency-tracker/data -name "raw-*.jsonl.zst" -mtime +2 -delete
+  - path: /etc/systemd/system/ext-sync.timer
+    content: |
+      [Unit]
+      Description=Hourly S3 sync of tracker results
+      [Timer]
+      OnCalendar=*-*-* *:15:00
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+runcmd:
+  - set -x
+  - |
+    if [ -n "${GIT_TOKEN_PARAM}" ]; then
+      TOKEN=$(aws ssm get-parameter --region ${REGION} --with-decryption --name "${GIT_TOKEN_PARAM}" --query Parameter.Value --output text)
+      CLONE_URL=$(echo "${REPO_URL}" | sed "s#https://#https://x-access-token:$TOKEN@#")
+    else
+      CLONE_URL="${REPO_URL}"
+    fi
+    git clone --depth 1 -b "${BRANCH}" "$CLONE_URL" /opt/ext-latency-tracker
+    git -C /opt/ext-latency-tracker remote set-url origin "${REPO_URL}"
+  - chown -R ec2-user:ec2-user /opt/ext-latency-tracker
+  # chrony on the Amazon Time Sync Service (+ the ENA PTP hardware clock when the instance exposes one)
+  - cp /opt/ext-latency-tracker/deploy/chrony.conf /etc/chrony.conf
+  - if [ -e /dev/ptp0 ]; then echo "refclock PHC /dev/ptp0 poll 0 delay 0.000010 prefer" >> /etc/chrony.conf; fi
+  - systemctl enable chronyd && systemctl restart chronyd
+  - sudo -u ec2-user python3.12 -m venv /opt/ext-latency-tracker/.venv
+  - sudo -u ec2-user /opt/ext-latency-tracker/.venv/bin/pip install --quiet --upgrade pip
+  - sudo -u ec2-user /opt/ext-latency-tracker/.venv/bin/pip install --quiet -e /opt/ext-latency-tracker
+  - sed -i "s|^s3_bucket:.*|s3_bucket: ${BUCKET}|" /opt/ext-latency-tracker/config.yaml
+  - cp /opt/ext-latency-tracker/deploy/ext-tracker.service /etc/systemd/system/ext-tracker.service
+  # wait for chrony to converge (<= 1 ms correction) before starting; the tracker re-checks itself
+  - chronyc waitsync 30 0.001 || true
+  - chronyc tracking || true
+  - systemctl daemon-reload
+  - systemctl enable --now ext-sync.timer
+  - systemctl enable --now ext-tracker
+  # safety: power off (= terminate, see launch flags) after the run budget
+  - shutdown -h +${RUN_MINUTES}
+  # power off as soon as the tracker has finished (it uploads its own results; this is a final backup sync)
+  - >-
+    systemd-run --unit ext-finish-watch /bin/bash -c 'sleep 30;
+    while true; do s=$(systemctl is-active ext-tracker); [ "$s" = inactive ] || [ "$s" = failed ] && break; sleep 10; done;
+    sudo -u ec2-user aws s3 sync /opt/ext-latency-tracker/data/${RUN_ID} s3://${BUCKET}/${RUN_ID}/ --only-show-errors;
+    journalctl -u ext-tracker --no-pager > /tmp/ext-tracker.journal;
+    sudo -u ec2-user aws s3 cp /tmp/ext-tracker.journal s3://${BUCKET}/${RUN_ID}/journal.txt --only-show-errors;
+    shutdown -h now'
