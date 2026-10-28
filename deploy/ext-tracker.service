@@ -1,0 +1,23 @@
+[Unit]
+Description=Extended feed latency tracker
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/opt/ext-latency-tracker
+# TRACKER_ARGS comes from /etc/ext-tracker.env (written by cloud-init), e.g. "--test --run-id test-..." or
+# "--minutes 1440 --require-clock --run-id run-..."
+EnvironmentFile=/etc/ext-tracker.env
+ExecStart=/opt/ext-latency-tracker/.venv/bin/python -m tracker.main --config config.yaml $TRACKER_ARGS
+# a finished run exits 0 (or 2 = test checks failed): don't restart it. Crashes and exit 3 (clock) restart.
+Restart=on-failure
+SuccessExitStatus=2
+RestartSec=5
+# SIGTERM: flush, final summary, report, upload - give the report time
+TimeoutStopSec=900
+Nice=-5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

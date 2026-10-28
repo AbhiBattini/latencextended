@@ -1,0 +1,55 @@
+# Extended feed latency tracker configuration. See SPEC.md and README.md.
+
+# Extended market -> Binance USD-M futures symbol (reference feed). Set binance to "" to skip it.
+markets:
+  - {market: HYPE-USD, binance: hypeusdt}
+  - {market: BTC-USD, binance: btcusdt}
+  - {market: ETH-USD, binance: ethusdt}
+  - {market: SOL-USD, binance: solusdt}
+
+endpoints:
+  rest: https://api.starknet.extended.exchange/api/v1
+  ws_v1: wss://api.starknet.extended.exchange/stream.extended.exchange/v1
+  ws_v2: wss://api.starknet.extended.exchange/stream.extended.exchange/v2/rpc
+  binance_ws: wss://fstream.binance.com/ws
+
+# Mandatory on REST and WebSocket (requests without it are rejected).
+user_agent: ext-latency-tracker/0.1
+
+# Production feed set (SPEC §3.4). One socket per (feed, market).
+feeds:
+  ext_d1_a: true
+  ext_d1_b: true
+  ext_full: true
+  ext_trades: true
+  ext_rpc: true
+  ext_rpc_d1: true
+  bin_top: true
+
+# Optional control feeds (all-markets streams, mark/index). Always on in --test.
+controls: false
+
+# Per-feed URL template overrides, e.g. to mute a feed for the acceptance test:
+#   url_overrides: {ext_d1_b: "wss://.../v1/orderbooks/NOPE-USD?depth=1"}
+# "{market}" is replaced with the market name.
+url_overrides: {}
+
+output_dir: data
+s3_bucket:
+run_minutes: 60          # long-run default when neither --minutes nor --test is given
+test_minutes: 15
+
+warmup_s: 15             # rows this soon after a connect are excluded from statistics
+silent_book_s: 30        # watchdog: book/price feeds
+silent_trades_s: 900     # watchdog: trade / RFQ feeds
+netprobe_interval_s: 60  # 30 in test mode
+markets_poll_s: 600
+race_window_s: 5         # a touch state is finalised this long after its first sighting
+writer_queue: 500000
+
+clock:
+  mode: auto             # auto | chrony | sntp | none
+  max_error_ms: 1.0
+  wait_s: 60             # test mode: wait this long for chrony to converge
+  sample_s: 60
+  sntp_servers: [time.google.com, time.cloudflare.com]
