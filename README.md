@@ -122,6 +122,37 @@ off as soon as the tracker exits, after a final S3 sync and a copy of the journa
 
 The tracker itself handles SIGTERM: it flushes, writes the final summary, builds the report and uploads it.
 
+### Letting a Claude Code cloud session operate AWS
+
+[deploy/claude-operator-policy.json](deploy/claude-operator-policy.json) is a least-privilege policy for a dedicated
+IAM user that a Claude Code cloud session uses to run `launch.sh` / `teardown.sh` and manage the research workspace:
+`us-east-1` and `ap-northeast-1` only; no GPU, bare-metal or 24xlarge+ instances; stop/terminate/SSM only on instances
+tagged `Project=ext-latency-tracker` or `alpha-research`; S3 only on `ext-latency-tracker-*` / `alpha-research-*`
+buckets (no bucket deletion or bucket policies); IAM only on `ext-tracker-role` / `alpha-research-role`, which may get
+`AmazonSSMManagedInstanceCore` attached and nothing else; read-only Cost Explorer. One residual risk: those two roles'
+inline policies can be rewritten, so watch them if you widen anything.
+
+With admin credentials, once:
+
+```bash
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+aws iam create-user --user-name claude-operator
+aws iam create-policy --policy-name claude-operator --policy-document file://deploy/claude-operator-policy.json
+aws iam attach-user-policy --user-name claude-operator --policy-arn arn:aws:iam::$ACCOUNT:policy/claude-operator
+aws iam create-access-key --user-name claude-operator
+```
+
+Add the key pair to the cloud environment as a network secret (environment settings → Network secrets); never paste it
+into a chat. Install the CLI in the environment's setup script:
+
+```bash
+curl -sSfo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" \
+  && unzip -q -o /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update
+```
+
+`aws sts get-caller-identity` in a new session should then print the `claude-operator` ARN. Rotate the key with
+`aws iam create-access-key` / `delete-access-key`; a launch-script SG left untagged must be deleted by hand.
+
 ## Choices made where the spec left room
 
 - **AL2023 has no cron**, so the hourly S3 sync is a systemd timer. It also prunes raw files older than 2 days.
